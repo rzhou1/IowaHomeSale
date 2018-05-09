@@ -6,6 +6,7 @@ from sklearn import preprocessing
 from sklearn.preprocessing import StandardScaler, PolynomialFeatures, RobustScaler
 from scipy.special import boxcox1p
 from sklearn.pipeline import Pipeline
+from sklearn.metrics import make_scorer, mean_squared_error
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.linear_model import LassoCV, RidgeCV, ElasticNetCV
 from sklearn.kernel_ridge import KernelRidge
@@ -14,7 +15,6 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 import xgboost as xgb
 from xgboost import XGBRegressor
 import lightgbm as lgb
-from sklearn.metrics import make_scorer, mean_squared_error
 import warnings
 warnings.filterwarnings('ignore')
 #%matplotlib inline
@@ -22,6 +22,7 @@ warnings.filterwarnings('ignore')
 pd.set_option('display.mpl_style', 'default')
 pd.set_option('display.width', 3000)
 
+##data load, remove outliers in training data, and combine training and test data
 na_values=['NA', 'N/A']
 data_train = pd.read_csv('train.csv', na_values=na_values)
 data_train = data_train.drop(data_train[(data_train.LotArea > 50000) & (data_train.SalePrice < 200000)].index)
@@ -62,10 +63,8 @@ for feature in dtype_features:
 ##LotFrontage imputer
 data_all['LotFrontage'] = data_all.groupby("Neighborhood")['LotFrontage'].transform(lambda x: x.fillna(x.mean()))
 
-#Add features: 'TotalSF'
+#Add features: 'TotalSF', 'BuiltAge' and 'RemodelAge'
 data_all['TotalSF'] = data_all['TotalBsmtSF'] + data_all['1stFlrSF'] + data_all['2ndFlrSF']
-# data_all['BuiltAge'] = np.abs(data_all['YrSold'] - data_all['YearBuilt'])
-# data_all['RemodelAge'] = np.abs(data_all['YrSold'] - data_all['YearRemodAdd'])
 
 def BuiltAge(data):
     data['BuiltAge'] = data['YrSold'] - data['YearBuilt']
@@ -84,9 +83,9 @@ def RemodelAge(data):
     return data
 
 
-#Features transform
+##Features transform
 def Stand_Scaler(data):
-    norm_features = ['PoolArea', 'BsmtUnfSF', 'GarageArea', 'TotalBsmtSF']
+    norm_features = ['PoolArea', 'BsmtUnfSF', 'GarageArea', 'TotalBsmtSF'] #better normalcy compared to boxcox1p / log1p
     Scaler = StandardScaler()
     Scaler = Scaler.fit(data[norm_features])
     dt = Scaler.transform(data[norm_features])
@@ -107,7 +106,7 @@ def feature_transform(data):
                   'Condition1', 'Condition2', 'Electrical', 'ExterCond', 'ExterQual',
                   'Fence','FireplaceQu', 'Functional', 'GarageCars', 'GarageCond', 'GarageFinish', 'GarageQual',
                   'Heating', 'HeatingQC', 'HouseStyle','KitchenQual', 'LandSlope', 'MasVnrType', 'MiscFeature',
-                  'MoSold', 'MSSubClass', 'PavedDrive', 'PoolQC', 'RoofMatl', 'Street']
+                  'MoSold', 'MSSubClass', 'PavedDrive', 'PoolQC', 'RoofMatl', 'Street'] #features with ordering
 
     data = BuiltAge(data)
     data = RemodelAge(data)
@@ -119,17 +118,16 @@ data_all=feature_transform(data_all)
 data_all = data_all.drop(['Utilities', 'GarageYrBlt', 'YrSold', 'YearBuilt', 'YearRemodAdd', 'MiscFeature', 'PoolQC',
                           'Alley'], axis=1)
 
-cols = data_all.columns.tolist()
-cols = cols[41:42] + cols[48:49] + cols[:41] + cols[42:48] + cols[49:]
-data_all = data_all[cols]
+# cols = data_all.columns.tolist()
+# cols = cols[41:42] + cols[48:49] + cols[:41] + cols[42:48] + cols[49:]
+# data_all = data_all[cols]
 
 #Get dummies for categorical features without ordering
 # categ_features = ['BldgType', 'CentralAir', 'Exterior1st', 'Exterior2nd', 'Foundation', 'GarageType', 'LandContour',
 #                   'LotConfig', 'LotShape', 'MSZoning', 'Neighborhood', 'RoofStyle', 'SaleCondition', 'SaleType']
-
 data_all = pd.get_dummies(data_all)
 
-#Highly skewed features: boxcox1p or log1p transform
+##skewed features: boxcox1p or log1p transform
 float_numeric = ['GrLivArea', '1stFlrSF', '2ndFlrSF', 'MasVnrArea', 'OpenPorchSF', 'EnclosedPorch',
                  'BsmtFinSF1', 'BsmtFinSF2', '3SsnPorch', 'MiscVal','WoodDeckSF', 'ScreenPorch', 'LowQualFinSF',
                  'TotalSF', 'LotArea', 'LotFrontage']
@@ -152,15 +150,41 @@ test_size = 0.3
 x_train, x_test, y_train, y_test = train_test_split(x, y, test_size = test_size, random_state = 1)
 mse_dict = {}
 
-##models
-#Linear: LassoCV
-lin = Pipeline([('Scale', RobustScaler()),
-                            ('Poly', PolynomialFeatures(degree=2)),
-                              ('Linear', LassoCV(alphas = np.logspace(-3,2,5), cv=3, fit_intercept=False))])
+##Base models
+#Linear
+degree = 2
 
+linear_models =[Pipeline([('Scale', RobustScaler()),
+                            ('Poly', PolynomialFeatures(degree=degree)),
+                              ('Linear', LassoCV(alphas = np.logspace(-3,2,5), cv=3, fit_intercept=False))]),
+                Pipeline([('Scale', RobustScaler()),
+                            ('Poly', PolynomialFeatures(degree=degree)),
+                              ('Linear', RidgeCV(alphas = np.logspace(-3,2,5), cv=3, fit_intercept=False))]),
+                Pipeline([('Scale', RobustScaler()),
+                            ('Poly', PolynomialFeatures(degree=degree, include_bias=True)),
+                          ('Linear', ElasticNetCV(l1_ratio=[0.1, 0.2, 0.3, 0.5, 0.9, 0.99, 1], alphas=np.logspace(-3,2,5), fit_intercept=False, max_iter=1e3, cv=3))])
+               ]
+
+mse_list = []
+for i in range(3):
+    model = linear_models[i]
+    model.fit(x_train, y_train)
+    linear = model.get_params('linear')['Linear']
+    if hasattr(linear, 'alpha_'):
+        print 'alpha for model %d: %.2f.' % (i+1, linear.alpha_)
+    if hasattr(linear, 'l1_ratio_'):
+        print 'l1_ratio for model %d: %.2f.' % (i+1, linear.l1_ratio_)
+    y_hat = model.predict(x_test)
+    mse = mean_squared_error(y_hat, y_test)
+    mse_list.append(mse)
+#print (mse_list)
+
+lin = linear_models[mse_list.index(min(mse_list))]
 lin.fit(x_train, y_train)
 y_hat_lin = lin.predict(x_test)
-mse_dict['Lasso'] = mean_squared_error(y_hat_lin, y_test)
+# print lin
+# print mean_squared_error(y_hat_lin, y_test)
+mse_dict['Linear'] = mean_squared_error(y_hat_lin, y_test)
 
 #KernelRidge
 krr = KernelRidge(alpha=0.5, kernel='polynomial', degree=2, coef0=5)
@@ -184,7 +208,7 @@ mse_dict['KRR'] = mean_squared_error(y_hat_krr, y_test)
 
 #Gradient Boosting
 gbr = GradientBoostingRegressor()
-params_gbr = {'loss': ['ls'], 'learning_rate': [0.05, 0.1], 'n_estimators': [100, 1000], 'max_depth': [3,5],
+params_gbr = {'loss': ['ls'], 'learning_rate': [0.05, 0.1], 'n_estimators': [100, 1000, 2000], 'max_depth': [3,5],
          'min_samples_split': [2,5,8], 'max_features': ['auto', 'log2', 'sqrt']}
 gbr=GridSearchCV(gbr, params_gbr, cv=3, n_jobs=-1, verbose=1)
 gbr.fit(x_train, y_train)
@@ -193,8 +217,8 @@ mse_dict['GradientBoosting'] = mean_squared_error(y_hat_gbr, y_test)
 
 #XGBoost
 xgbr = xgb.XGBRegressor()
-params_xgbr = {'max_depth': [3,5,8], 'learning_rate': [0.05, 0.1], 'n_estimators': [100, 1000], 'objective': ['reg:linear'], 'gamma': [i/10.0 for i in range(1,2)],
-          'reg_alpha': [i/10.0 for i in range(0,2)], 'reg_lambda': [0.5, 1.0], 'min_child_weight': [2, 3, 5]}
+params_xgbr = {'max_depth': [3,5,8], 'learning_rate': [0.05, 0.1], 'n_estimators': [100, 1000], 'objective': ['reg:linear'], 'gamma': [i/10.0 for i in range(1,3)],
+          'reg_alpha': [i/10.0 for i in range(0,3)], 'reg_lambda': [0.5, 1.0], 'min_child_weight': [2, 3, 5]}
 xgbr = GridSearchCV(xgbr, params_xgbr, cv=3, n_jobs=-1, verbose=1)
 xgbr.fit(x_train, y_train)
 y_hat_xgb = xgbr.predict(x_test)
@@ -202,7 +226,7 @@ mse_dict['XGBoost'] = mean_squared_error(y_hat_xgb, y_test)
 
 #LightGBM
 lgb = lgb.LGBMRegressor(boosting_type='gbdt', objective='regression', metric = 'mean_squared_error')
-params_lgb = {'learning_rate': [0.02, 0.05, 0.1], 'n_estimator': [50, 100, 1000, 5000], 'max_depth': [5,10,20], 'num_leaves': [10, 20, 31, 40]}
+params_lgb = {'learning_rate': [0.02, 0.05, 0.1], 'n_estimator': [50, 100, 1000, 5000], 'max_depth': [5,10,20], 'num_leaves': [10, 31, 40]}
 lgb = GridSearchCV(lgb, params_lgb, n_jobs=-1, verbose=1)
 lgb.fit(x_train, y_train)
 y_hat_lgb = lgb.predict(x_test)
@@ -210,12 +234,12 @@ mse_dict['LightGBM'] = mean_squared_error(y_hat_lgb, y_test)
 
 #Plots of predicted values using base models versus actual
 t = np.arange(len(y_test))
-results = pd.DataFrame(data={'Actual': y_test, 'Lasso': y_hat_lin, 'GradientBoosting': y_hat_gbr,
+results = pd.DataFrame(data={'Actual': y_test, 'Lasso': y_hat_lin, 'KernelRidge': y_hat_krr, 'GradientBoosting': y_hat_gbr,
                              'XGBoost': y_hat_xgb, 'LightGBM': y_hat_lgb})
 results = results.sort_values(by = 'Actual', axis  = 0)
 
-colors = 'grbkmy'
-models = ['Lasso', '', 'GradientBoosting', 'XGBoost', 'LightGBM']
+colors = 'grbkm'
+models = ['Lasso', 'KernelRidge', 'GradientBoosting', 'XGBoost', 'LightGBM']
 plt.figure(figsize=(18,12))
 for k, m in enumerate(models):
     ax = plt.subplot(len(models)/2, 2, k+1)
@@ -227,7 +251,7 @@ for k, m in enumerate(models):
     plt.legend(loc='best')
     plt.grid()
 plt.suptitle("Predicted Ames Home versus Actual from Test Data", fontsize=15)
-# results.to_csv('train_test_results.csv')
+results.to_csv('train_test_results.csv')
 
 #residual plots for test results
 results_residual = pd.DataFrame()
@@ -236,9 +260,9 @@ for model in models:
 results_residual['Actual'] = results['Actual']
 
 plt.figure(figsize=(18,12))
-for i, m in enumerate(models):
+for i, model in enumerate(models):
     ax = plt.subplot(len(models)/2, 2, i+1)
-    plt.plot(results_residual.Actual, results_residual[m], 'o', color=colors[i], label=m)
+    plt.plot(results_residual.Actual, results_residual[model], 'o', color=colors[i], label=model)
     plt.xlabel('Actual Price')
     plt.ylabel('Residual')
     plt.xlim([10,14])
@@ -246,11 +270,11 @@ for i, m in enumerate(models):
     plt.legend(loc='upper left')
 plt.suptitle("Residual of predicted and actual")
 
-print mse_dict
+#print mse_dict
 
-#prediction on test data using base estimators
+##prediction on test data using base estimators
 
-models = [lin, krr, gbr, xgb, lgb]
+base_models = [lin, krr, gbr, xgb, lgb]
 
 def get_prediction(models, x_test):
     nrow = x_test.shape[0]
@@ -261,7 +285,7 @@ def get_prediction(models, x_test):
     return results
 
 
-pred_results = get_prediction(models, d_test.drop('Id', axis=1))
+pred_results = get_prediction(base_models, d_test.drop('Id', axis=1))
 pred_results.rename(columns={'0': 'Lasso', '1': 'KRR', '2': 'GBR', '3': 'XGB', '4': 'LGB'})
 
 predictions = pd.DataFrame(data={'Id': d_test['Id'], 'Lasso': np.exp(pred_results.iloc[:, 0]),
@@ -273,9 +297,9 @@ predictions = pd.DataFrame(data={'Id': d_test['Id'], 'Lasso': np.exp(pred_result
 predictions['Mean'] = np.mean(predictions.drop('Id', axis=1), axis=1)
 predictions.to_csv('predictions_base_estimator.csv')
 
-#stacking:
+##stacking:
 results = pd.read_csv('train_test_results.csv')
-predictions = pd.read_csv('predictions.csv')
+predictions = pd.read_csv('predictions_base_estimator.csv')
 
 
 xs = results[['Lasso', 'KernelRidge', 'GradientBoosting', 'XGBoost', 'LightGBM']]
@@ -283,39 +307,45 @@ ys = results['Actual']
 
 xs_test = np.log(predictions.drop(['Id', 'mean'], axis=1))
 
-# #Lasso
-# lins = Pipeline([('Poly', PolynomialFeatures(degree=2)), ('Linear', LassoCV(alphas=np.logspace(-3,2,5), cv=3, max_iter=1e5, fit_intercept=False))])
-# lins.fit(xs, ys)
-# y_hat_lins = lins.predict(xs_test)
+##predict using all 5 base models and then average predicted results.
+##Lasso
+lins = Pipeline([('Poly', PolynomialFeatures(degree=2)), ('Linear', LassoCV(alphas=np.logspace(-3,2,5), cv=3, max_iter=1e5, fit_intercept=False))])
+lins.fit(xs, ys)
+y_hat_lins = lins.predict(xs_test)
 # print lins
-#KernelRidge
-# krrs = KernelRidge(kernel='polynomial')
-# params_krrs = {'alpha': [0.1, 0.2, 0.5], 'degree': [2,3], 'coef0':[0.5,2.5,5]}
-# krrs = GridSearchCV(krrs, params_krrs, cv=3, n_jobs=-1, verbose=1)
-# krrs.fit(xs, ys)
-# y_hat_krrs = krrs.predict(xs_test)
+
+##KernelRidge
+krrs = KernelRidge(kernel='polynomial')
+params_krrs = {'alpha': [0.1, 0.2, 0.5], 'degree': [2,3], 'coef0':[0.5,2.5,5]}
+krrs = GridSearchCV(krrs, params_krrs, cv=3, n_jobs=-1, verbose=1)
+krrs.fit(xs, ys)
+y_hat_krrs = krrs.predict(xs_test)
 # print krrs
-#GradientBoosting
-# gbrs = GradientBoostingRegressor()
-# params_gbrs = {'learning_rate': [0.05, 0.1], 'n_estimators': [100, 500], 'max_depth': [3,5],'min_samples_split': [2,3]}
-# gbrs=GridSearchCV(gbrs, params_gbrs, cv=3, n_jobs=-1, verbose=1)
-# gbrs.fit(xs, ys)
-# y_hat_gbrs = gbrs.predict(xs_test)
-# print gbrs
-# #XGBoost
-# xgbs = xgb.XGBRegressor()
-# params_xgbs = {'max_depth': [3,5,8], 'learning_rate': [0.05, 0.1, 0.2], 'n_estimators': [20, 100, 1000], 'objective': ['reg:linear'], 'gamma': [i/10.0 for i in range(1,3)], 'reg_alpha': [i/10.0 for i in range(0,3)], 'reg_lambda': [0, 0.2, 0.5, 0.8, 1.0]}
-# xgbs = GridSearchCV(xgbs, params_xgbs, cv=3, n_jobs=-1, verbose=1)
-# xgbs.fit(xs, ys)
-# y_hat_xgbs = xgbs.predict(xs_test)
-# print xgbs
-#LightGBM
-# lgbs = lgb.LGBMRegressor(boosting_type='gbdt', objective='regression', metric = 'mean_squared_error')
-# params_lgbs = {'learning_rate': [0.05, 0.1], 'n_estimator': [100, 500], 'max_depth': [3,5]}
-# lgbs = GridSearchCV(lgbs, params_lgbs, n_jobs=-1, verbose=1)
-# lgbs.fit(xs, ys)
-# y_hat_lgbs = lgbs.predict(xs_test)
-# print lgbs
+
+##GradientBoosting
+gbrs = GradientBoostingRegressor()
+params_gbrs = {'learning_rate': [0.05, 0.1], 'n_estimators': [100, 500], 'max_depth': [3,5],'min_samples_split': [2,3]}
+gbrs=GridSearchCV(gbrs, params_gbrs, cv=3, n_jobs=-1, verbose=1)
+gbrs.fit(xs, ys)
+y_hat_gbrs = gbrs.predict(xs_test)
+#print gbrs
+
+##XGBoost
+xgbs = xgb.XGBRegressor()
+params_xgbs = {'max_depth': [3,5,8], 'learning_rate': [0.05, 0.1, 0.2], 'n_estimators': [20, 100, 1000], 'objective': ['reg:linear'], 'gamma': [i/10.0 for i in range(1,3)], 'reg_alpha': [i/10.0 for i in range(0,3)], 'reg_lambda': [0, 0.2, 0.5, 0.8, 1.0]}
+xgbs = GridSearchCV(xgbs, params_xgbs, cv=3, n_jobs=-1, verbose=1)
+xgbs.fit(xs, ys)
+y_hat_xgbs = xgbs.predict(xs_test)
+#print xgbs
+
+##LightGBM
+lgbs = lgb.LGBMRegressor(boosting_type='gbdt', objective='regression', metric = 'mean_squared_error')
+params_lgbs = {'learning_rate': [0.05, 0.1], 'n_estimator': [100, 500], 'max_depth': [3,5]}
+lgbs = GridSearchCV(lgbs, params_lgbs, n_jobs=-1, verbose=1)
+lgbs.fit(xs, ys)
+y_hat_lgbs = lgbs.predict(xs_test)
+#print lgbs
+
 predictions_stack = pd.DataFrame(data={'Id': predictions['Id'], 'Lasso': np.exp(y_hat_lins), 'KernelRidge': np.exp(y_hat_krrs),
                                       'GradientBoosting': np.exp(y_hat_gbrs), 'LightGBM': np.exp(y_hat_lgbs)})
 predictions_stack['Mean'] = np.mean(predictions_stack.drop('Id', axis=1), axis=1)
