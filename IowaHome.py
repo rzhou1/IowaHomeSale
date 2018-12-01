@@ -3,352 +3,401 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn import preprocessing
-from sklearn.preprocessing import StandardScaler, PolynomialFeatures, RobustScaler
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures, RobustScaler, MinMaxScaler
+from scipy.stats import skew
 from scipy.special import boxcox1p
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import make_scorer, mean_squared_error
 from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.linear_model import LassoCV, RidgeCV, ElasticNetCV
+from sklearn.cross_validation import KFold
+from sklearn.linear_model import LassoCV, RidgeCV, ElasticNetCV, Lasso, Ridge, ElasticNet
 from sklearn.kernel_ridge import KernelRidge
 from sklearn.tree import DecisionTreeRegressor
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.svm import SVR
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, AdaBoostRegressor
 import xgboost as xgb
 from xgboost import XGBRegressor
 import lightgbm as lgb
 import warnings
 warnings.filterwarnings('ignore')
-#%matplotlib inline
+# %matplotlib inline
 
-pd.set_option('display.mpl_style', 'default')
-pd.set_option('display.width', 3000)
+def loadCombineData():
+    na_values = ['NA', 'N/A']
+    data_train = pd.read_csv('train.csv', na_values=na_values)
+    data_train = data_train.drop(data_train[(data_train.LotArea > 50000) & (data_train.SalePrice < 200000)].index)
+    data_test = pd.read_csv('test.csv', na_values=na_values)
+    data_all = pd.concat([data_train, data_test])
+    data_all = data_all.drop(['SalePrice'], axis=1)
+    m_train = data_train.shape[0]
+    return data_train, data_all, data_test, m_train
 
-##data load, remove outliers in training data, and combine training and test data
-na_values=['NA', 'N/A']
-data_train = pd.read_csv('train.csv', na_values=na_values)
-data_train = data_train.drop(data_train[(data_train.LotArea > 50000) & (data_train.SalePrice < 200000)].index)
-data_test = pd.read_csv('test.csv', na_values=na_values)
-data_all = pd.concat([data_train, data_test])
-data_all = data_all.drop(['SalePrice'], axis=1)
-m_train = data_train.shape[0]
-m_test = data_test.shape[0]
+class Preprocess():
+    def __init__(self):
+        pass
 
-##Data pre-processing: imputer and dtype transform
-##imputing missing values: numbered values fill(0), categorical values fill('None'), features with single-digits NA fill with mode()[0]
+    def _imputer(self, data):
+        fillNoneFeatures = ['PoolQC', 'Alley', 'Fence', 'MiscFeature', 'FireplaceQu', 'GarageType', 'GarageFinish',
+                            'GarageQual', 'GarageCond', 'BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1',
+                            'BsmtFinType2', 'MasVnrType']
+        fillZeroFeatures = ['GarageArea', 'GarageCars', 'BsmtFinSF1', 'BsmtFinSF2', 'BsmtUnfSF', '1stFlrSF', '2ndFlrSF',
+                            'TotalBsmtSF', 'BsmtFullBath', 'BsmtHalfBath', 'MasVnrArea']
+        fillModeFeatures = ['Functional', 'MSZoning', 'Electrical', 'KitchenQual', 'Exterior1st', 'Exterior2nd','SaleType']
+        for feature in fillNoneFeatures:
+            data[feature] = data[feature].fillna('None')
+        for feature in fillZeroFeatures:
+            data[feature] = data[feature].fillna(0)
+        for feature in fillModeFeatures:
+            data[feature] = data[feature].fillna(data[feature].mode()[0])
+        data['LotFrontage'] = data.groupby("Neighborhood")['LotFrontage'].transform(lambda x: x.fillna(x.mean()))
+        return data
 
-fill_none_features = ['PoolQC', 'Alley', 'Fence', 'MiscFeature', 'FireplaceQu', 'GarageType', 'GarageFinish',
-                      'GarageQual', 'GarageCond', 'BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1',
-                      'BsmtFinType2', 'MasVnrType', ]
-fill_zero_features = ['GarageArea', 'GarageCars', 'BsmtFinSF1', 'BsmtFinSF2', 'BsmtUnfSF', '1stFlrSF', '2ndFlrSF',
-                      'TotalBsmtSF', 'BsmtFullBath', 'BsmtHalfBath', 'MasVnrArea']
-fill_mode_features = ['Functional', 'MSZoning', 'Electrical', 'KitchenQual', 'Exterior1st', 'Exterior2nd', 'SaleType']
+    def _dtype_transform(self, data):
+        dtypeFeatures = ['MSSubClass', 'MoSold', 'OverallCond']
+        for feature in dtypeFeatures:
+            data_all[feature] = data_all[feature].apply(str)
+        return data
 
+    def _bin_built_age(self, data):
+        data['BuiltAge'] = data['YrSold'] - data['YearBuilt']
+        bins = (-5, 1, 5, 10, 15, 20, 30, 40, 50, 60, 80, 100, 150)
+        group_names = ['1', '5', '10', '15', '20', '30', '40', '50', '60', '80', '100', '150']
+        categories = pd.cut(data['BuiltAge'], bins, labels=group_names)
+        data['BuiltAge'] = categories
+        return data
 
-def Imputing_na(data, fill_none_features, fill_zero_features, fill_mode_features):
-    for feature in fill_none_features:
-        data[feature] = data[feature].fillna('None')
-    for feature in fill_zero_features:
-        data[feature] = data[feature].fillna(0)
-    for feature in fill_mode_features:
-        data[feature] = data[feature].fillna(data[feature].mode()[0])
-    return data
+    def _bin_remodel_age(self, data):
+        data['RemodelAge'] = data['YrSold'] - data['YearRemodAdd']
+        bins = (-5, 1, 5, 10, 15, 20, 30, 40, 50, 60)
+        group_names=['1', '5', '10', '15', '20', '30', '40', '50', '60']
+        categories = pd.cut(data['RemodelAge'], bins, labels=group_names)
+        data['RemodelAge'] = categories
+        return data
 
+    def _add_features(self, data):
+        data['TotalSF'] = data['TotalBsmtSF'] + data['1stFlrSF'] + data['2ndFlrSF']
+        data['Seasonality'] = data['MoSold'].astype(int)//4
+        return data
 
-data_all = Imputing_na(data_all, fill_none_features, fill_zero_features, fill_mode_features)
-
-##dtype transform: numeric to categorical
-dtype_features = ['MSSubClass', 'MoSold', 'OverallCond']
-for feature in dtype_features:
-    data_all[feature] = data_all[feature].apply(str)
-
-##LotFrontage imputer
-data_all['LotFrontage'] = data_all.groupby("Neighborhood")['LotFrontage'].transform(lambda x: x.fillna(x.mean()))
-
-#Add features: 'TotalSF', 'BuiltAge' and 'RemodelAge'
-data_all['TotalSF'] = data_all['TotalBsmtSF'] + data_all['1stFlrSF'] + data_all['2ndFlrSF']
-
-def BuiltAge(data):
-    data['BuiltAge'] = data['YrSold'] - data['YearBuilt']
-    bins = (-5,1,5,10,15,20,30,40,50,60,80,100,150)
-    group_names=['1','5','10','15','20','30','40','50','60','80','100','150']
-    categories = pd.cut(data['BuiltAge'], bins, labels=group_names)
-    data['BuiltAge'] = categories
-    return data
-
-def RemodelAge(data):
-    data['RemodelAge'] = data['YrSold'] - data['YearRemodAdd']
-    bins = (-5, 1, 5, 10, 15, 20, 30, 40, 50, 60)
-    group_names=['1', '5', '10', '15', '20', '30', '40', '50', '60']
-    categories = pd.cut(data['RemodelAge'], bins, labels=group_names)
-    data['RemodelAge'] = categories
-    return data
-
-
-##Features transform
-def Stand_Scaler(data):
-    norm_features = ['PoolArea', 'BsmtUnfSF', 'GarageArea', 'TotalBsmtSF'] #better normalcy compared to boxcox1p / log1p
-    Scaler = StandardScaler()
-    Scaler = Scaler.fit(data[norm_features])
-    dt = Scaler.transform(data[norm_features])
-    dt = pd.DataFrame(dt)
-
-    for i, feature in enumerate(norm_features):
-        data.loc[:, feature] = dt.iloc[:, i]
-    return data
-
-def encode_features(data, features):
-    for feature in features:
-        le = preprocessing.LabelEncoder().fit(data[feature])
-        data[feature] = le.transform(data[feature])
-    return data
-
-def feature_transform(data):
-    e_features = ['Alley', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1', 'BsmtFinType2', 'BsmtQual',
-                  'Condition1', 'Condition2', 'Electrical', 'ExterCond', 'ExterQual',
-                  'Fence','FireplaceQu', 'Functional', 'GarageCars', 'GarageCond', 'GarageFinish', 'GarageQual',
-                  'Heating', 'HeatingQC', 'HouseStyle','KitchenQual', 'LandSlope', 'MasVnrType', 'MiscFeature',
-                  'MoSold', 'MSSubClass', 'PavedDrive', 'PoolQC', 'RoofMatl', 'Street'] #features with ordering
-
-    data = BuiltAge(data)
-    data = RemodelAge(data)
-    data = Stand_Scaler(data)
-    data = encode_features(data, e_features)
-    return data
-
-data_all=feature_transform(data_all)
-data_all = data_all.drop(['Utilities', 'GarageYrBlt', 'YrSold', 'YearBuilt', 'YearRemodAdd', 'MiscFeature', 'PoolQC',
-                          'Alley'], axis=1)
-
-# cols = data_all.columns.tolist()
-# cols = cols[41:42] + cols[48:49] + cols[:41] + cols[42:48] + cols[49:]
-# data_all = data_all[cols]
-
-#Get dummies for categorical features without ordering
-# categ_features = ['BldgType', 'CentralAir', 'Exterior1st', 'Exterior2nd', 'Foundation', 'GarageType', 'LandContour',
-#                   'LotConfig', 'LotShape', 'MSZoning', 'Neighborhood', 'RoofStyle', 'SaleCondition', 'SaleType']
-data_all = pd.get_dummies(data_all)
-
-##skewed features: boxcox1p or log1p transform
-float_numeric = ['GrLivArea', '1stFlrSF', '2ndFlrSF', 'MasVnrArea', 'OpenPorchSF', 'EnclosedPorch',
-                 'BsmtFinSF1', 'BsmtFinSF2', '3SsnPorch', 'MiscVal','WoodDeckSF', 'ScreenPorch', 'LowQualFinSF',
-                 'TotalSF', 'LotArea', 'LotFrontage']
-#skewness = data_all[float_numeric].apply(lambda x: skew(x.dropna())).sort_values(ascending=False)
-
-lam = 0.2
-for feature in float_numeric:
-    data_all[feature] = boxcox1p(data_all[feature], lam)
-#data_all[skew_features] = np.log1p(data_all[skew_features])
-#skewness_bc = data_all[skew_features].apply(lambda x: skew(x)).sort_values(ascending=False)
-
-##define train and test data
-d_train = data_all.iloc[:m_train, :]
-d_test = data_all.iloc[m_train:, :]
-
-x = d_train.iloc[:, 1:]
-y = np.log(data_train['SalePrice'])
-
-test_size = 0.3
-x_train, x_test, y_train, y_test = train_test_split(x, y, test_size = test_size, random_state = 1)
-mse_dict = {}
-
-##Base models
-#Linear
-degree = 2
-
-linear_models =[Pipeline([('Scale', RobustScaler()),
-                            ('Poly', PolynomialFeatures(degree=degree)),
-                              ('Linear', LassoCV(alphas = np.logspace(-3,2,5), cv=3, fit_intercept=False))]),
-                Pipeline([('Scale', RobustScaler()),
-                            ('Poly', PolynomialFeatures(degree=degree)),
-                              ('Linear', RidgeCV(alphas = np.logspace(-3,2,5), cv=3, fit_intercept=False))]),
-                Pipeline([('Scale', RobustScaler()),
-                            ('Poly', PolynomialFeatures(degree=degree, include_bias=True)),
-                          ('Linear', ElasticNetCV(l1_ratio=[0.1, 0.2, 0.3, 0.5, 0.9, 0.99, 1], alphas=np.logspace(-3,2,5), fit_intercept=False, max_iter=1e3, cv=3))])
-               ]
-
-mse_list = []
-for i in range(3):
-    model = linear_models[i]
-    model.fit(x_train, y_train)
-    linear = model.get_params('linear')['Linear']
-    if hasattr(linear, 'alpha_'):
-        print 'alpha for model %d: %.2f.' % (i+1, linear.alpha_)
-    if hasattr(linear, 'l1_ratio_'):
-        print 'l1_ratio for model %d: %.2f.' % (i+1, linear.l1_ratio_)
-    y_hat = model.predict(x_test)
-    mse = mean_squared_error(y_hat, y_test)
-    mse_list.append(mse)
-#print (mse_list)
-
-lin = linear_models[mse_list.index(min(mse_list))]
-lin.fit(x_train, y_train)
-y_hat_lin = lin.predict(x_test)
-# print lin
-# print mean_squared_error(y_hat_lin, y_test)
-mse_dict['Linear'] = mean_squared_error(y_hat_lin, y_test)
-
-#KernelRidge
-krr = KernelRidge(alpha=0.5, kernel='polynomial', degree=2, coef0=5)
-krr.fit(x_train, y_train)
-y_hat_krr = krr.predict(x_test)
-mse_dict['KRR'] = mean_squared_error(y_hat_krr, y_test)
-
-#RandomForest
-# rfr = RandomForestRegressor(n_jobs=-1)
-#
-# parameters = {'n_estimators':[100,1000],
-#              'max_features':['log2','sqrt','auto'],
-#              'criterion':['mse'],
-#               'max_depth':[3,5,8],
-#              'min_samples_split':[3,5],
-#              'min_samples_leaf':[2,3,5]}
-# rfr = GridSearchCV(rfr, parameters, scoring = make_scorer(mean_squared_error),n_jobs=-1,verbose=1)
-# rfr.fit(x_train, y_train)
-# y_hat_rfr = rfr.predict(x_test)
-# mse_dict['RandomForest'] = mean_squared_error(y_test, y_hat_rfr)
-
-#Gradient Boosting
-gbr = GradientBoostingRegressor()
-params_gbr = {'loss': ['ls'], 'learning_rate': [0.05, 0.1], 'n_estimators': [100, 1000, 2000], 'max_depth': [3,5],
-         'min_samples_split': [2,5,8], 'max_features': ['auto', 'log2', 'sqrt']}
-gbr=GridSearchCV(gbr, params_gbr, cv=3, n_jobs=-1, verbose=1)
-gbr.fit(x_train, y_train)
-y_hat_gbr = gbr.predict(x_test)
-mse_dict['GradientBoosting'] = mean_squared_error(y_hat_gbr, y_test)
-
-#XGBoost
-xgbr = xgb.XGBRegressor()
-params_xgbr = {'max_depth': [3,5,8], 'learning_rate': [0.05, 0.1], 'n_estimators': [100, 1000], 'objective': ['reg:linear'], 'gamma': [i/10.0 for i in range(1,3)],
-          'reg_alpha': [i/10.0 for i in range(0,3)], 'reg_lambda': [0.5, 1.0], 'min_child_weight': [2, 3, 5]}
-xgbr = GridSearchCV(xgbr, params_xgbr, cv=3, n_jobs=-1, verbose=1)
-xgbr.fit(x_train, y_train)
-y_hat_xgb = xgbr.predict(x_test)
-mse_dict['XGBoost'] = mean_squared_error(y_hat_xgb, y_test)
-
-#LightGBM
-lgb = lgb.LGBMRegressor(boosting_type='gbdt', objective='regression', metric = 'mean_squared_error')
-params_lgb = {'learning_rate': [0.02, 0.05, 0.1], 'n_estimator': [50, 100, 1000, 5000], 'max_depth': [5,10,20], 'num_leaves': [10, 31, 40]}
-lgb = GridSearchCV(lgb, params_lgb, n_jobs=-1, verbose=1)
-lgb.fit(x_train, y_train)
-y_hat_lgb = lgb.predict(x_test)
-mse_dict['LightGBM'] = mean_squared_error(y_hat_lgb, y_test)
-
-#Plots of predicted values using base models versus actual
-t = np.arange(len(y_test))
-results = pd.DataFrame(data={'Actual': y_test, 'Lasso': y_hat_lin, 'KernelRidge': y_hat_krr, 'GradientBoosting': y_hat_gbr,
-                             'XGBoost': y_hat_xgb, 'LightGBM': y_hat_lgb})
-results = results.sort_values(by = 'Actual', axis  = 0)
-
-colors = 'grbkm'
-models = ['Lasso', 'KernelRidge', 'GradientBoosting', 'XGBoost', 'LightGBM']
-plt.figure(figsize=(18,12))
-for k, m in enumerate(models):
-    ax = plt.subplot(len(models)/2, 2, k+1)
-    plt.plot(t, results.Actual, label='Actual', color='magenta')
-    plt.plot(t, results[m], label=m, color=colors[k])
-    plt.xlabel('Home no.')
-    plt.ylabel('Price')
-    plt.autoscale()
-    plt.legend(loc='best')
-    plt.grid()
-plt.suptitle("Predicted Ames Home versus Actual from Test Data", fontsize=15)
-results.to_csv('train_test_results.csv')
-
-#residual plots for test results
-results_residual = pd.DataFrame()
-for model in models:
-    results_residual[model] = results['Actual'] - results[model]
-results_residual['Actual'] = results['Actual']
-
-plt.figure(figsize=(18,12))
-for i, model in enumerate(models):
-    ax = plt.subplot(len(models)/2, 2, i+1)
-    plt.plot(results_residual.Actual, results_residual[model], 'o', color=colors[i], label=model)
-    plt.xlabel('Actual Price')
-    plt.ylabel('Residual')
-    plt.xlim([10,14])
-    plt.ylim([-1,1])
-    plt.legend(loc='upper left')
-plt.suptitle("Residual of predicted and actual")
-
-#print mse_dict
-
-##prediction on test data using base estimators
-
-base_models = [lin, krr, gbr, xgb, lgb]
-
-def get_prediction(models, x_test):
-    nrow = x_test.shape[0]
-    results = np.zeros(nrow, len(models))
-    for i in range(len(models)):
-        model = models[i]
-        results[:, i] = model.predict(x_test)
-    return results
+    def preprocess(self, data):
+        data = self._imputer(data)
+        data = self._dtype_transform(data)
+        data = self._bin_built_age(data)
+        data = self._bin_remodel_age(data)
+        data = self._add_features(data)
+        return data
 
 
-pred_results = get_prediction(base_models, d_test.drop('Id', axis=1))
-pred_results.rename(columns={'0': 'Lasso', '1': 'KRR', '2': 'GBR', '3': 'XGB', '4': 'LGB'})
+class FeaturesTransform(object):
+    def __init__(self):
+        pass
 
-predictions = pd.DataFrame(data={'Id': d_test['Id'], 'Lasso': np.exp(pred_results.iloc[:, 0]),
-                                 'KernelRidge': np.exp(pred_results.iloc[:, 1]),
-                                 'GradientBoosting': np.exp(pred_results.iloc[:, 2]),
-                                 'XGBoost': np.exp(pred_results.iloc[:, 3]),
-                                 'LightGBM': np.exp(pred_results.iloc[:, 4])})
+    def _boxcox_transform(self, data, lam):
+        '''To reduce skewness of numeric features.'''
+        transformFeatureIndex = (0, 1, 2, 3, 4, 5, 9, 12, 15, 19, 20, 21, 22, 23, 24, 27, 30, 36)
+        numericFeatures = data.select_dtypes(exclude='object').columns.tolist()
+        transformNumericFeatures = [item for i, item in enumerate(numericFeatures) if i in transformFeatureIndex]
+        skewness = data[transformNumericFeatures].apply(lambda x: skew(x.dropna())).sort_values(ascending=False)
+        skewness = pd.DataFrame(data={'skewness': skewness})
+        skewTransformNumericFeatures = skewness[abs(skewness.skewness) > 0.5].index
+        for feature in skewTransformNumericFeatures:
+            data[feature] = boxcox1p(data[feature], lam)
+        return data
 
-predictions['Mean'] = np.mean(predictions.drop('Id', axis=1), axis=1)
-predictions.to_csv('predictions_base_estimator.csv')
+    def _standard_scaler(self, data):
+        normFeatures = ['BsmtUnfSF', 'GarageArea', 'PoolArea',
+                        'TotalBsmtSF']  # better normalcy compared to boxcox1p / log1p
+        Scaler = StandardScaler()
+        Scaler = Scaler.fit(data[normFeatures])
+        dt = Scaler.transform(data[normFeatures])
+        dt = pd.DataFrame(dt)
 
-##stacking:
-results = pd.read_csv('train_test_results.csv')
-predictions = pd.read_csv('predictions_base_estimator.csv')
+        for i, feature in enumerate(normFeatures):
+            data.loc[:, feature] = dt.iloc[:, i]
+        return data
+
+    def _encode_ordinal_features(self, data):
+        '''Features with ordering.'''
+        nonEncodingFeaturesIndex = (1, 7, 13, 14, 17, 22, 27, 29, 30, 32, 36, 41, 42, 43, 45)
+        nonObjectOrdinalFeatures = ['BuiltAge', 'RemodelAge', 'GarageCars']
+        objectOrdinalFeatures = data.select_dtypes(include='object').columns.tolist()
+        ordinalFeatures = [item for i, item in enumerate(objectOrdinalFeatures) if i not in nonEncodingFeaturesIndex]
+        ordinalFeatures.extend(nonObjectOrdinalFeatures)
+        for feature in ordinalFeatures:
+            le = preprocessing.LabelEncoder().fit(data[feature])
+            data[feature] = le.transform(data[feature])
+        return data
+
+    def _drop_features(self, data):
+        data = data.drop(
+            ['Utilities', 'GarageYrBlt', 'YrSold', 'MoSold', 'YearBuilt', 'YearRemodAdd', 'MiscFeature', 'PoolQC',
+             'Alley'], axis=1)
+        return data
+
+    def _encode_categorical_features(self, data):
+        '''Features without apparent ordering.'''
+        categoricalFeatures = ['BldgType', 'CentralAir', 'Exterior1st', 'Exterior2nd', 'Foundation', 'GarageType',
+                               'LandContour',
+                               'LotConfig', 'LotShape', 'MSZoning', 'Neighborhood', 'RoofStyle', 'SaleCondition',
+                               'SaleType', 'Seasonality']
+        data = pd.get_dummies(data=data, columns=categoricalFeatures)
+        return data
+
+    def transform(self, data):
+        data = self._boxcox_transform(data, lam=0.2)
+        data = self._standard_scaler(data)
+        data = self._encode_ordinal_features(data)
+        data = self._drop_features(data)
+        data = self._encode_categorical_features(data)
+        return data
 
 
-xs = results[['Lasso', 'KernelRidge', 'GradientBoosting', 'XGBoost', 'LightGBM']]
-ys = results['Actual']
+# Split all the data into train, validation and test(unknown 'SalePrice'). Here we use train and validation for pre-tuning
+# base models by GridSearchCV (not shown in "main" part).
+def trainValTestSplit(data, data_train, test_size, random_state):
+    '''part1. train and test(validation) data split.'''
+    cols = data.columns.tolist()
+    cols = cols[35:36] + cols[:35] + cols[36:]  # move 'ID' to the 1st column
+    data = data[cols]
+    x = data.iloc[:m_train, 1:]
+    y = np.log1p(data_train['SalePrice'])
+    x_test = data.iloc[m_train:, 1:]
+    x_train, x_val, y_train, y_val = train_test_split(x, y, test_size=test_size, random_state=random_state)
 
-xs_test = np.log(predictions.drop(['Id', 'mean'], axis=1))
+    '''part2. drop features with zero standard deviations after split.'''
+    zeroStdFeatures = []
+    datasets = [x_train, x_val, x_test]
+    dTemp = []
+    for d in datasets:
+        Describe = d.describe()
+        dZeroStdFeatures = Describe.loc[:, Describe.loc['std', :] == 0].columns.tolist()
+        zeroStdFeatures.extend(dZeroStdFeatures)
+    for ds in datasets:
+        ds = ds.drop(zeroStdFeatures, axis=1)
+        dTemp.append(ds)
 
-##predict using all 5 base models and then average predicted results.
-##Lasso
-lins = Pipeline([('Poly', PolynomialFeatures(degree=2)), ('Linear', LassoCV(alphas=np.logspace(-3,2,5), cv=3, max_iter=1e5, fit_intercept=False))])
-lins.fit(xs, ys)
-y_hat_lins = lins.predict(xs_test)
-# print lins
+    x_train, x_val, x_test = dTemp
 
-##KernelRidge
-krrs = KernelRidge(kernel='polynomial')
-params_krrs = {'alpha': [0.1, 0.2, 0.5], 'degree': [2,3], 'coef0':[0.5,2.5,5]}
-krrs = GridSearchCV(krrs, params_krrs, cv=3, n_jobs=-1, verbose=1)
-krrs.fit(xs, ys)
-y_hat_krrs = krrs.predict(xs_test)
-# print krrs
+    return x_train, x_val, y_train, y_val, x_test
 
-##GradientBoosting
-gbrs = GradientBoostingRegressor()
-params_gbrs = {'learning_rate': [0.05, 0.1], 'n_estimators': [100, 500], 'max_depth': [3,5],'min_samples_split': [2,3]}
-gbrs=GridSearchCV(gbrs, params_gbrs, cv=3, n_jobs=-1, verbose=1)
-gbrs.fit(xs, ys)
-y_hat_gbrs = gbrs.predict(xs_test)
-#print gbrs
 
-##XGBoost
-xgbs = xgb.XGBRegressor()
-params_xgbs = {'max_depth': [3,5,8], 'learning_rate': [0.05, 0.1, 0.2], 'n_estimators': [20, 100, 1000], 'objective': ['reg:linear'], 'gamma': [i/10.0 for i in range(1,3)], 'reg_alpha': [i/10.0 for i in range(0,3)], 'reg_lambda': [0, 0.2, 0.5, 0.8, 1.0]}
-xgbs = GridSearchCV(xgbs, params_xgbs, cv=3, n_jobs=-1, verbose=1)
-xgbs.fit(xs, ys)
-y_hat_xgbs = xgbs.predict(xs_test)
-#print xgbs
+# Split the whole data into train (known 'SalePrice') and test (unknown 'SalePrice'), not validation. Here we run the base
+# models by KFold that automatically place one fold for validation.
+def trainTestSplit(data, data_train, random_state):
+    '''part1. train and test data split.'''
+    cols = data.columns.tolist()
+    cols = cols[35:36] + cols[:35] + cols[36:]  # move 'ID' to the 1st column
+    data = data[cols]
+    x_train = data.iloc[:m_train, 1:]
+    y_train = np.log1p(data_train['SalePrice'])
+    x_test = data.iloc[m_train:, 1:]
 
-##LightGBM
-lgbs = lgb.LGBMRegressor(boosting_type='gbdt', objective='regression', metric = 'mean_squared_error')
-params_lgbs = {'learning_rate': [0.05, 0.1], 'n_estimator': [100, 500], 'max_depth': [3,5]}
-lgbs = GridSearchCV(lgbs, params_lgbs, n_jobs=-1, verbose=1)
-lgbs.fit(xs, ys)
-y_hat_lgbs = lgbs.predict(xs_test)
-#print lgbs
+    '''part2. drop features with zero standard deviations after split.'''
+    zeroStdFeatures = []
+    datasets = [x_train, x_test]
+    dTemp = []
+    for d in datasets:
+        Describe = d.describe()
+        dZeroStdFeatures = Describe.loc[:, Describe.loc['std', :] == 0].columns.tolist()
+        zeroStdFeatures.extend(dZeroStdFeatures)
+    for ds in datasets:
+        ds = ds.drop(zeroStdFeatures, axis=1)
+        dTemp.append(ds)
 
-predictions_stack = pd.DataFrame(data={'Id': predictions['Id'], 'Lasso': np.exp(y_hat_lins), 'KernelRidge': np.exp(y_hat_krrs),
-                                      'GradientBoosting': np.exp(y_hat_gbrs), 'LightGBM': np.exp(y_hat_lgbs)})
-predictions_stack['Mean'] = np.mean(predictions_stack.drop('Id', axis=1), axis=1)
-predictions_stack.to_csv('predictions_stack.csv')
-submission = pd.DataFrame({'Id': predictions_stack['Id'], 'SalePrice': predictions_stack['Mean']})
-submission.to_csv('submission.csv',index=False)
+    x_train, x_test = dTemp
+
+    return x_train, y_train, x_test
+
+
+# Robust scaling and polynomial transform for linear (and generalized linear) models
+class Pipeline(object):
+    def __init__(self, x_train, x_test, degree):
+        self.x_all = pd.concat([x_train, x_test])
+        self.degree = degree
+
+    def _robustScaler(self):
+        transformer = RobustScaler().fit(self.x_all)
+        self.x_all = transformer.transform(self.x_all)
+        self.x_all = pd.DataFrame(data=self.x_all)
+
+        return self.x_all
+
+    def _polynomialFeatures(self):
+        poly = PolynomialFeatures(degree=self.degree)
+        self.x_all = poly.fit_transform(self.x_all)
+
+        return self.x_all
+
+    def transform(self):
+        self.x_all = self._robustScaler()
+        self.x_all = self._polynomialFeatures()
+        self.x_all = pd.DataFrame(data=self.x_all)
+        x_all_copy = self.x_all.copy()
+        x_train_transform = x_all_copy.iloc[:m_train, :]
+        x_test_transform = x_all_copy.iloc[m_train:, :]
+
+        return x_train_transform, x_test_transform
+
+#Define base models' training and predicting.
+class BaseModels(object):
+    def __init__(self, model, seed, params=None):
+        #         params['random_state'] = seed
+        self.model = model(**params)
+
+    def train(self, x_train, y_train):
+        return self.model.fit(x_train, y_train)
+
+    def fit(self, X, y):
+        return self.model.fit(X, y)
+
+    def predict(self, X):
+        return self.model.predict(X)
+
+    def kFold(self, x_train, y_train, x_test):
+        n_folds = 5
+        kf = KFold(x_train.shape[0], n_folds=n_folds, random_state=0)
+        oof_train = np.zeros((x_train.shape[0],))
+        oof_test_kf = np.zeros((n_folds, x_test.shape[0]))
+
+        for i, (train_index, test_index) in enumerate(kf):
+            x_train_kf = x_train.iloc[train_index]
+            y_train_kf = y_train.iloc[train_index]
+            x_test_kf = x_train.iloc[test_index]
+
+            self.model.fit(x_train_kf, y_train_kf)
+
+            oof_train[test_index] = self.model.predict(x_test_kf)
+            oof_test_kf[i, :] = self.model.predict(x_test)
+
+        oof_test = oof_test_kf.mean(axis=0)
+        return oof_train, oof_test
+
+
+def getBasePred(baseModels, params, x_train, y_train, x_test):
+    '''Get prediction results from all base models.'''
+    oof_train_hat = []
+    oof_test_hat = []
+    columns = {}
+    baseMSE = {}
+    for model, param in zip(baseModels, params):
+        oof_train, oof_test = BaseModels(model, seed=0, params=param).kFold(x_train, y_train, x_test)
+        oof_train_hat.append(oof_train)
+        oof_test_hat.append(oof_test)
+        baseMSE[model.__name__] = mean_squared_error(y_train, oof_train)
+
+    for i in range(len(baseModels)):
+        columns[i] = baseModels[i].__name__
+
+    oof_train_hat, oof_test_hat = pd.DataFrame(data=oof_train_hat).T, pd.DataFrame(data=oof_test_hat).T
+    oof_train_hat, oof_test_hat = oof_train_hat.rename(columns=columns), oof_test_hat.rename(columns=columns)
+
+    return oof_train_hat, oof_test_hat, baseMSE
+
+
+def stackingModel(models, x_train, y_train, x_test, n_folds):
+    '''Model on prediction data by base models.'''
+    stackPredTrain = []
+    stackPredTest = []
+    stackMSE = []
+
+    for model in models:
+        stackTrainOOF = np.zeros((x_train.shape[0],))
+        stackTestOOF = np.zeros((n_folds, x_test.shape[0]))
+        mseOOF = np.zeros((n_folds, 1))
+        kf = KFold(x_train.shape[0], n_folds=n_folds, random_state=0)
+        for i, (train_index, test_index) in enumerate(kf):
+            x_train_oof = x_train.iloc[train_index]
+            y_train_oof = y_train.iloc[train_index]
+            x_test_oof = x_train.iloc[test_index]
+            model.fit(x_train_oof, y_train_oof)
+            stackTrainOOF[test_index] = model.predict(x_test_oof)
+            mseOOF[i, :] = mean_squared_error(y_train.iloc[test_index], stackTrainOOF[test_index])
+            stackTestOOF[i, :] = model.predict(x_test)
+        stackTestOOF = stackTestOOF.mean(axis=0)
+        stackPredTrain.append(stackTrainOOF)
+        stackPredTest.append(stackTestOOF)
+        mseOOF = mseOOF.mean(axis=0)
+        stackMSE.append(mseOOF)
+
+    stackPredTrain = pd.DataFrame(data=stackPredTrain).T
+    stackPredTest = pd.DataFrame(data=stackPredTest).T
+    stackMSE = pd.DataFrame(data=stackMSE)
+
+    return stackPredTrain, stackPredTest, stackMSE
+
+
+#Base prediction models: the hyperparameters for these models have been pre-tuned by GridSearchCV.
+
+params_gbr = {'loss': 'ls', 'learning_rate': 0.03, 'n_estimators': 1000, 'max_depth': 3,'min_samples_split': 3,
+              'max_features': 'sqrt'}
+params_xgbr = {'max_depth': 5, 'learning_rate': 0.03, 'n_estimators': 500, 'objective': 'reg:linear',
+               'min_child_weight': 5, 'gamma': 0.1, 'reg_lambda': 0.1}
+params_Lasso = {'alpha': 0.01, 'max_iter':50, 'fit_intercept': False}
+params_RF = {'n_estimators':100, 'max_features':'auto', 'max_depth':8, 'min_samples_split': 5, 'min_samples_leaf':2}
+params_lgb = {'learning_rate': 0.1, 'n_estimators': 50, 'max_depth': 5, 'num_leaves': 10, 'boosting_type': 'gbdt',
+              'objective': 'regression'}
+params_Ridge = {'alpha': 0.01, 'max_iter': 100, 'fit_intercept': False}
+params_KRR = {'alpha': 100, 'kernel': 'polynomial', 'degree': 2, 'coef0': 1000}
+params_DT = {'max_depth': 8, 'min_samples_split': 3, 'min_samples_leaf': 3, 'max_features': 'auto'}
+params_SVR = {'kernel': 'rbf', 'degree': 2, 'gamma': 'auto', 'coef0': 0.1, 'C': 1, 'max_iter': 1000}
+params_ada = {'n_estimators': 1000, 'learning_rate': 0.3, 'loss': 'square'}
+
+#Stacking (level 1) prediction models: similarly, the hyperparameters for these models have been pre-tuned by GridSearchCV.
+xgbr = xgb.XGBRegressor(max_depth=8, learning_rate=0.1, n_estimators=100, gamma=0.1, objective='reg:linear',
+                        booster='gbtree', reg_lambda=1.0, min_child_weight=2)
+Lasso = Lasso(alpha=0.001, max_iter=50, fit_intercept=False)
+Ridge = Ridge(alpha=0.3, max_iter=50, fit_intercept=False)
+krr = KernelRidge(alpha=1, kernel='polynomial', degree=2, coef0=5)
+gbr = GradientBoostingRegressor(learning_rate=0.01, criterion='friedman_mse', loss='ls', max_depth=3, n_estimators=500,
+                                max_features='sqrt', min_samples_split=8)
+lgbm = lgb.LGBMRegressor(boosting_type='gbdt', learning_rate=0.1, max_depth=3, n_estimators=50, min_leaves=10,
+                         lambda_l1=0.1, lambda_l2=1)
+rf = RandomForestRegressor(n_estimators=50, criterion='mse', max_depth=8, max_features='log2', min_samples_split=8,
+                           min_samples_leaf=2)
+#svm = SVR(C=1, coef0=0.1, degree=2, gamma='auto', kernel='rbf', max_iter=1000)
+ada = AdaBoostRegressor(learning_rate=0.01, n_estimators=100, loss='square')
+dt = DecisionTreeRegressor(max_depth=5, max_features='sqrt', min_samples_leaf=2, min_samples_split=5)
+
+if __name__ == '__main__':
+    '''Data loading, preprocessing, feature engineering and train/test spliting.'''
+
+    data_train, data_all, data_test, m_train = loadCombineData()  # load data
+    data_all = Preprocess().preprocess(data_all)  # data preprocess
+    data_all = FeaturesTransform().transform(data_all)  # feature transform
+    x_train, y_train, x_test = trainTestSplit(data_all, data_train, random_state=0)  # train and test data split
+    x_train_poly2, x_test_poly2 = Pipeline(x_train, x_test, 2).transform()  #Polynomialfeature transform for Linear models
+
+    '''Base models prediction (KFold cross-validation).'''
+
+    baseParams = [params_gbr, params_xgbr, params_RF, params_lgb, params_Ridge, params_KRR, params_DT, params_SVR, params_ada]
+    baseModels = [GradientBoostingRegressor, xgb.XGBRegressor, RandomForestRegressor, lgb.LGBMRegressor, Ridge,
+                  KernelRidge, DecisionTreeRegressor, SVR, AdaBoostRegressor]
+    baseParamsLin = [params_Lasso]
+    baseModelsLin = [Lasso]
+    oof_train_hat, oof_test_hat, baseMSE = getBasePred(baseModels, baseParams, x_train, y_train, x_test)
+    oof_train_hat_lasso, oof_test_hat_lasso, baseMSELasso = getBasePred(baseModels_lin, baseParams_lin, x_train_poly2,
+                                                                     y_train, x_test_poly2)
+
+    base_train, base_test, baseMSE = pd.DataFrame(data=oof_train_hat), pd.DataFrame(data=oof_test_hat), pd.DataFrame(data=baseMSE)
+    base_train['Lasso'], base_test['Lasso'], baseMSE['Lasso'] = oof_train_hat_lasso.Lasso, oof_test_hat_lasso.Lasso, baseMSELasso
+    print baseMSE
+
+    '''Stacking model prediction.'''
+    '''Stack: level-1, stack predictions from base models.'''
+
+    stackingModels = [xgbr, Lasso, Ridge, krr, gbr, lgbm, rf, ada, dt]
+    stackPredTrain, stackPredTest, stackMSE = stackingModel(stackingModels, base_train, y_train, base_test, 5)
+    columns = {0: 'XGBoost', 1: 'Lasso', 2: 'Ridge', 3: 'KRR', 4: 'GradientBoosting', 5: 'LightGBM', 6: 'RandomForest',
+               7: 'AdaBoost', 8: 'DecisionTree'}
+    stackPredTrain = stackPredTrain.rename(columns=columns)
+    stackPredTest = stackPredTest.rename(columns=columns)
+    print stackMSE.rename(columns=columns)
+
+    '''Stack: level-2, stack predictions from level-1 models. Here we exemplify it using KernelRidge.'''
+
+    krr = KernelRidge(alpha=1, kernel='polynomial', degree=2, coef0=5)
+    krr.fit(stackPredTrain, y_train_base)
+    y_stack2_pred = krr.predict(stackPredTest)
+    stack2Sub = pd.DataFrame(data=data_test.Id)
+    stack2Sub['SalePrice'] = y_stack2_pred
+    stack2Sub.to_csv('stack2Sub.csv', index=False)  # prediction for submission    
