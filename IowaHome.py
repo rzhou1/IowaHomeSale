@@ -52,13 +52,13 @@ class Preprocess():
         data['LotFrontage'] = data.groupby("Neighborhood")['LotFrontage'].transform(lambda x: x.fillna(x.mean()))
         return data
 
-    def _dtype_transform(self, data):
+    def _dtypeTransform(self, data):
         dtypeFeatures = ['MSSubClass', 'MoSold', 'OverallCond']
         for feature in dtypeFeatures:
             data_all[feature] = data_all[feature].apply(str)
         return data
 
-    def _bin_built_age(self, data):
+    def _binBuiltAge(self, data):
         data['BuiltAge'] = data['YrSold'] - data['YearBuilt']
         bins = (-5, 1, 5, 10, 15, 20, 30, 40, 50, 60, 80, 100, 150)
         group_names = ['1', '5', '10', '15', '20', '30', '40', '50', '60', '80', '100', '150']
@@ -66,7 +66,7 @@ class Preprocess():
         data['BuiltAge'] = categories
         return data
 
-    def _bin_remodel_age(self, data):
+    def _binRemodelAge(self, data):
         data['RemodelAge'] = data['YrSold'] - data['YearRemodAdd']
         bins = (-5, 1, 5, 10, 15, 20, 30, 40, 50, 60)
         group_names=['1', '5', '10', '15', '20', '30', '40', '50', '60']
@@ -74,17 +74,17 @@ class Preprocess():
         data['RemodelAge'] = categories
         return data
 
-    def _add_features(self, data):
+    def _addFeatures(self, data):
         data['TotalSF'] = data['TotalBsmtSF'] + data['1stFlrSF'] + data['2ndFlrSF']
         data['Seasonality'] = data['MoSold'].astype(int)//4
         return data
 
     def preprocess(self, data):
         data = self._imputer(data)
-        data = self._dtype_transform(data)
-        data = self._bin_built_age(data)
-        data = self._bin_remodel_age(data)
-        data = self._add_features(data)
+        data = self._dtypeTransform(data)
+        data = self._binBuiltAge(data)
+        data = self._binRemodelAge(data)
+        data = self._addFeatures(data)
         return data
 
 
@@ -92,7 +92,7 @@ class FeaturesTransform(object):
     def __init__(self):
         pass
 
-    def _boxcox_transform(self, data, lam):
+    def _boxcoxTransform(self, data, lam):
         '''To reduce skewness of numeric features.'''
         transformFeatureIndex = (0, 1, 2, 3, 4, 5, 9, 12, 15, 19, 20, 21, 22, 23, 24, 27, 30, 36)
         numericFeatures = data.select_dtypes(exclude='object').columns.tolist()
@@ -104,7 +104,7 @@ class FeaturesTransform(object):
             data[feature] = boxcox1p(data[feature], lam)
         return data
 
-    def _standard_scaler(self, data):
+    def _standardScaler(self, data):
         normFeatures = ['BsmtUnfSF', 'GarageArea', 'PoolArea',
                         'TotalBsmtSF']  # better normalcy compared to boxcox1p / log1p
         Scaler = StandardScaler()
@@ -116,7 +116,7 @@ class FeaturesTransform(object):
             data.loc[:, feature] = dt.iloc[:, i]
         return data
 
-    def _encode_ordinal_features(self, data):
+    def _encodeOrdinalFeatures(self, data):
         '''Features with ordering.'''
         nonEncodingFeaturesIndex = (1, 7, 13, 14, 17, 22, 27, 29, 30, 32, 36, 41, 42, 43, 45)
         nonObjectOrdinalFeatures = ['BuiltAge', 'RemodelAge', 'GarageCars']
@@ -128,13 +128,13 @@ class FeaturesTransform(object):
             data[feature] = le.transform(data[feature])
         return data
 
-    def _drop_features(self, data):
+    def _dropFeatures(self, data):
         data = data.drop(
             ['Utilities', 'GarageYrBlt', 'YrSold', 'MoSold', 'YearBuilt', 'YearRemodAdd', 'MiscFeature', 'PoolQC',
              'Alley'], axis=1)
         return data
 
-    def _encode_categorical_features(self, data):
+    def _encodeCategoricalFeatures(self, data):
         '''Features without apparent ordering.'''
         categoricalFeatures = ['BldgType', 'CentralAir', 'Exterior1st', 'Exterior2nd', 'Foundation', 'GarageType',
                                'LandContour',
@@ -144,11 +144,11 @@ class FeaturesTransform(object):
         return data
 
     def transform(self, data):
-        data = self._boxcox_transform(data, lam=0.2)
-        data = self._standard_scaler(data)
-        data = self._encode_ordinal_features(data)
-        data = self._drop_features(data)
-        data = self._encode_categorical_features(data)
+        data = self._boxcoxTransform(data, lam=0.2)
+        data = self._standardScaler(data)
+        data = self._encodeOrdinalFeatures(data)
+        data = self._dropFeatures(data)
+        data = self._encodeCategoricalFeatures(data)
         return data
 
 
